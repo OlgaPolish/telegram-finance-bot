@@ -1,10 +1,13 @@
 #!/usr/bin/env python
 # coding: utf-8
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials  # Современная библиотека
 from datetime import datetime
 import pytz
 import os
@@ -21,7 +24,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --- GOOGLE SHEETS ---
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+# Правильные scopes для Google Sheets API
+SCOPES = [
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive'
+]
 
 # Функция для получения credentials из переменной окружения
 def get_google_credentials():
@@ -33,34 +40,36 @@ def get_google_credentials():
             credentials_json = base64.b64decode(credentials_base64).decode('utf-8')
             credentials_dict = json.loads(credentials_json)
             
-            # Создаем временный файл
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as temp_file:
-                json.dump(credentials_dict, temp_file)
-                temp_file_path = temp_file.name
-            
-            return ServiceAccountCredentials.from_json_keyfile_name(temp_file_path, scope)
+            # Используем современную библиотеку google.oauth2
+            return Credentials.from_service_account_info(credentials_dict, scopes=SCOPES)
         except Exception as e:
             logger.error(f"Ошибка при обработке GOOGLE_CREDENTIALS_BASE64: {e}")
     
     # Если Base64 не работает, попробуем обычный файл
     credentials_file = os.getenv('GOOGLE_CREDENTIALS_FILE', 'finance-bot-keys.json')
     if os.path.exists(credentials_file):
-        return ServiceAccountCredentials.from_json_keyfile_name(credentials_file, scope)
+        return Credentials.from_service_account_file(credentials_file, scopes=SCOPES)
     
     raise Exception("Не найдены учетные данные Google. Установите GOOGLE_CREDENTIALS_BASE64 или поместите файл finance-bot-keys.json")
 
 # Получаем credentials
-creds = get_google_credentials()
-client = gspread.authorize(creds)
-
-# Название таблицы из переменной окружения или по умолчанию
-sheet_name = os.getenv('GOOGLE_SHEET_NAME', 'MY_Dvag')
-sheet = client.open(sheet_name).sheet1
+try:
+    creds = get_google_credentials()
+    client = gspread.authorize(creds)
+    
+    # Название таблицы из переменной окружения или по умолчанию
+    sheet_name = os.getenv('GOOGLE_SHEET_NAME', 'MY_Dvag')
+    sheet = client.open(sheet_name).sheet1
+    logger.info(f"Подключение к Google Sheets '{sheet_name}' успешно")
+except Exception as e:
+    logger.error(f"Ошибка подключения к Google Sheets: {e}")
+    sheet = None
 
 # --- TELEGRAM BOT ---
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+# Поддерживаем оба варианта названия переменной
+TOKEN = os.getenv('TOKEN') or os.getenv('TELEGRAM_BOT_TOKEN')
 if not TOKEN:
-    raise Exception("Не установлен TELEGRAM_BOT_TOKEN")
+    raise Exception("Не установлен TOKEN или TELEGRAM_BOT_TOKEN")
 
 # Этапы диалога
 TEMA, NAME, PHONE, DATE = range(4)
@@ -107,6 +116,13 @@ async def get_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Получаем текущую дату и время в среднеевропейском часовом поясе
     created_at = get_current_datetime()
+    
+    if not sheet:
+        logger.error("Google Sheets не подключен")
+        await update.message.reply_text(
+            "Произошла ошибка при подключении к базе данных. Пожалуйста, попробуйте позже или свяжитесь с администратором."
+        )
+        return ConversationHandler.END
     
     try:
         # Сохраняем в Google Sheets с добавлением времени создания записи
@@ -159,6 +175,7 @@ def main():
     app.add_error_handler(error_handler)
     
     logger.info("Бот запущен")
+    print("🚀 Бот запущен! Нажмите Ctrl+C для остановки")
     app.run_polling()
 
 if __name__ == "__main__":
