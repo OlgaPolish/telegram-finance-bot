@@ -9,6 +9,9 @@ from datetime import datetime
 import pytz
 import os
 import logging
+import json
+import base64
+import tempfile
 
 # Настройка логирования
 logging.basicConfig(
@@ -20,9 +23,34 @@ logger = logging.getLogger(__name__)
 # --- GOOGLE SHEETS ---
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 
-# Получаем путь к файлу ключей из переменной окружения или используем по умолчанию
-credentials_file = os.getenv('GOOGLE_CREDENTIALS_FILE', 'finance-bot-keys.json')
-creds = ServiceAccountCredentials.from_json_keyfile_name(credentials_file, scope)
+# Функция для получения credentials из переменной окружения
+def get_google_credentials():
+    # Попробуем получить credentials из Base64
+    credentials_base64 = os.getenv('GOOGLE_CREDENTIALS_BASE64')
+    if credentials_base64:
+        try:
+            # Декодируем Base64
+            credentials_json = base64.b64decode(credentials_base64).decode('utf-8')
+            credentials_dict = json.loads(credentials_json)
+            
+            # Создаем временный файл
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as temp_file:
+                json.dump(credentials_dict, temp_file)
+                temp_file_path = temp_file.name
+            
+            return ServiceAccountCredentials.from_json_keyfile_name(temp_file_path, scope)
+        except Exception as e:
+            logger.error(f"Ошибка при обработке GOOGLE_CREDENTIALS_BASE64: {e}")
+    
+    # Если Base64 не работает, попробуем обычный файл
+    credentials_file = os.getenv('GOOGLE_CREDENTIALS_FILE', 'finance-bot-keys.json')
+    if os.path.exists(credentials_file):
+        return ServiceAccountCredentials.from_json_keyfile_name(credentials_file, scope)
+    
+    raise Exception("Не найдены учетные данные Google. Установите GOOGLE_CREDENTIALS_BASE64 или поместите файл finance-bot-keys.json")
+
+# Получаем credentials
+creds = get_google_credentials()
 client = gspread.authorize(creds)
 
 # Название таблицы из переменной окружения или по умолчанию
@@ -30,15 +58,17 @@ sheet_name = os.getenv('GOOGLE_SHEET_NAME', 'MY_Dvag')
 sheet = client.open(sheet_name).sheet1
 
 # --- TELEGRAM BOT ---
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '456')
+TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+if not TOKEN:
+    raise Exception("Не установлен TELEGRAM_BOT_TOKEN")
 
 # Этапы диалога
 TEMA, NAME, PHONE, DATE = range(4)
 
 def get_current_datetime():
-    """Получить текущую дату и время в московском часовом поясе"""
-    moscow_tz = pytz.timezone('Europe/Moscow')
-    now = datetime.now(moscow_tz)
+    """Получить текущую дату и время в среднеевропейском часовом поясе"""
+    cet_tz = pytz.timezone('CET')  # Среднеевропейское время
+    now = datetime.now(cet_tz)
     return now.strftime('%d.%m.%Y %H:%M:%S')
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -75,7 +105,7 @@ async def get_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def get_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["date"] = update.message.text
     
-    # Получаем текущую дату и время
+    # Получаем текущую дату и время в среднеевропейском часовом поясе
     created_at = get_current_datetime()
     
     try:
@@ -85,10 +115,10 @@ async def get_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data["name"], 
             context.user_data["phone"], 
             context.user_data["date"],
-            created_at  # Добавляем поле с датой и временем создания записи
+            created_at  # Добавляем поле с датой и временем создания записи (среднеевропейское время)
         ])
         
-        logger.info(f"Запись добавлена для пользователя {context.user_data['name']} в {created_at}")
+        logger.info(f"Запись добавлена для пользователя {context.user_data['name']} в {created_at} (среднеевропейское время)")
         
         await update.message.reply_text(
             f"Спасибо, {context.user_data['name']}! 📅\n"
